@@ -99,6 +99,9 @@ class BrowserNavigationAgent:
                     # Tracks the most recently retrieved page state.
                     current_page_state = {}
 
+                    # Stores page states associated with navigation steps.
+                    page_states: list[dict] = []
+
                     try:
                         context = await browser.new_context()
                         page = await context.new_page()
@@ -131,6 +134,7 @@ class BrowserNavigationAgent:
                                         "termination_reason": termination_reason,
                                         "result_count": 0,
                                     },
+                                    page_states=page_states,
                                 )
                             )
                             continue
@@ -154,6 +158,7 @@ class BrowserNavigationAgent:
                         ]
 
                         llm_with_tools = self.llm.bind_tools(tools)
+
                         tools_map = {
                             tool.name: tool
                             for tool in tools
@@ -260,8 +265,8 @@ class BrowserNavigationAgent:
                                     )
                                     continue
 
-                                # Resolve the element name and type using the latest
-                                # page state before executing an interaction.
+                                # Resolve the element name and type using the
+                                # latest page state before executing an interaction.
                                 element_name = ""
                                 element_type = ""
                                 interaction_description = ""
@@ -273,48 +278,76 @@ class BrowserNavigationAgent:
 
                                     normalized_value = normalize_value(value)
 
-                                    # Determine whether the entered value represents a search parameter.
-                                    if value and normalized_value == normalize_value(self.keywords):
+                                    # Determine whether the entered value
+                                    # represents a search parameter.
+                                    if (
+                                        value
+                                        and normalized_value
+                                        == normalize_value(self.keywords)
+                                    ):
                                         stored_value = "{{keywords}}"
 
-                                    elif value and normalized_value == normalize_value(self.location):
+                                    elif (
+                                        value
+                                        and normalized_value
+                                        == normalize_value(self.location)
+                                    ):
                                         stored_value = "{{location}}"
 
                                     elif (
                                         value
                                         and self.language
-                                        and normalized_value == normalize_value(self.language)
+                                        and normalized_value
+                                        == normalize_value(self.language)
                                     ):
                                         stored_value = "{{language}}"
 
                                     else:
                                         stored_value = value
 
-                                    elements = current_page_state.get("elements", [])
+                                    elements = current_page_state.get(
+                                        "elements", []
+                                    )
 
                                     matched_element = next(
                                         (
                                             element
                                             for element in elements
-                                            if element.get("element_id") == element_id
+                                            if element.get("element_id")
+                                            == element_id
                                         ),
                                         None,
                                     )
 
                                     if matched_element:
-                                        element_name = matched_element.get("name", "")
-                                        element_type = matched_element.get("type", "")
+                                        element_name = matched_element.get(
+                                            "name", ""
+                                        )
+                                        element_type = matched_element.get(
+                                            "type", ""
+                                        )
                                     else:
-                                        element_name = f"Unknown element (element_id={element_id})"
+                                        element_name = (
+                                            f"Unknown element "
+                                            f"(element_id={element_id})"
+                                        )
 
                                     if action == "click":
                                         interaction_description = "Click"
+
                                     elif action == "fill":
-                                        interaction_description = f"Enter text: {stored_value}"
+                                        interaction_description = (
+                                            f"Enter text: {stored_value}"
+                                        )
+
                                     elif action == "check":
                                         interaction_description = "Check"
+
                                     elif action == "select":
-                                        interaction_description = f"Select option: {stored_value}"
+                                        interaction_description = (
+                                            f"Select option: {stored_value}"
+                                        )
+
                                     else:
                                         interaction_description = str(action)
 
@@ -325,29 +358,59 @@ class BrowserNavigationAgent:
 
                                     if tool_name == self._page_state_tool:
                                         # Save the latest page state so that
-                                        # state IDs can be mapped to element names.
+                                        # element IDs can be mapped to names.
                                         current_page_state = tool_result
 
                                     elif tool_name == self._interact_tool:
+                                        # Capture the page state preceding the
+                                        # interaction only when it succeeds.
+                                        interaction_succeeded = bool(
+                                            tool_result.get("success", False)
+                                        )
+
+                                        if interaction_succeeded:
+                                            page_states.append(
+                                                {
+                                                    "step_index": len(navigation_steps),
+                                                    "page_url": (current_page_state.get("url")),
+                                                    "page_title": (current_page_state.get("title")),
+                                                    "page_state": (current_page_state),
+                                                }
+                                            )
+
                                         # Record the actual interaction outcome.
                                         navigation_steps.append(
                                             {
                                                 "element": element_name,
                                                 "type": element_type,
-                                                "interaction": interaction_description,
-                                                "success": bool(
-                                                    tool_result.get("success", False)
+                                                "interaction": (
+                                                    interaction_description
                                                 ),
+                                                "success": interaction_succeeded,
                                             }
                                         )
 
                                     elif tool_name == self._extract_urls_tool:
+                                        # Capture the final listing page state
+                                        # before extracting vacancy URLs.
+                                        if current_page_state:
+                                            page_states.append(
+                                                {
+                                                    "step_index": len(navigation_steps),
+                                                    "page_url": (current_page_state.get("url")),
+                                                    "page_title": (current_page_state.get("title")),
+                                                    "page_state": (current_page_state),
+                                                }
+                                            )
+
                                         extracted_links = normalize_job_links(
                                             tool_result
                                         )
 
                                         for job_link in extracted_links:
-                                            site_candidates[job_link.url] = job_link
+                                            site_candidates[job_link.url] = (
+                                                job_link
+                                            )
 
                                         tool_result = extracted_links
 
@@ -355,7 +418,9 @@ class BrowserNavigationAgent:
                                             {
                                                 "element": "Vacancy listing",
                                                 "type": "listing",
-                                                "interaction": "Extract vacancy links",
+                                                "interaction": (
+                                                    "Extract vacancy links"
+                                                ),
                                                 "success": bool(extracted_links),
                                             }
                                         )
@@ -363,8 +428,15 @@ class BrowserNavigationAgent:
                                         extraction_completed = True
                                         termination_reason = "extraction_complete"
 
+                                    # Propagate the actual interaction result
+                                    # instead of always reporting success.
+                                    tool_success = True
+
+                                    if tool_name == self._interact_tool:
+                                        tool_success = bool(tool_result.get("success", False))
+
                                     tool_response = {
-                                        "success": True,
+                                        "success": tool_success,
                                         "data": tool_result,
                                     }
 
@@ -380,7 +452,9 @@ class BrowserNavigationAgent:
                                             {
                                                 "element": element_name,
                                                 "type": element_type,
-                                                "interaction": interaction_description,
+                                                "interaction": (
+                                                    interaction_description
+                                                ),
                                                 "success": False,
                                             }
                                         )
@@ -390,7 +464,9 @@ class BrowserNavigationAgent:
                                             {
                                                 "element": "Vacancy listing",
                                                 "type": "listing",
-                                                "interaction": "Extract vacancy links",
+                                                "interaction": (
+                                                    "Extract vacancy links"
+                                                ),
                                                 "success": False,
                                             }
                                         )
@@ -436,6 +512,7 @@ class BrowserNavigationAgent:
                                     "termination_reason": termination_reason,
                                     "result_count": len(site_links),
                                 },
+                                page_states=page_states,
                             )
                         )
 
@@ -460,6 +537,7 @@ class BrowserNavigationAgent:
                                     "result_count": len(site_candidates),
                                     "error": str(exc),
                                 },
+                                page_states=page_states,
                             )
                         )
 

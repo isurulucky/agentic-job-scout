@@ -180,11 +180,14 @@ async def main() -> None:
                 experiences=result.experience,
             )
 
-            if experience_id:
-                print(
-                    f"\n[*] Stored navigation experience for "
-                    f"{result.url} ({framework})."
-                )
+            experience_store.store_page_states(
+                experience_uuid=experience_id,
+                page_states=result.page_states,
+            )
+            print(
+                f"\n[*] Stored navigation experience for "
+                f"{result.url} ({framework})."
+            )
 
         links.extend(result.job_links)
 

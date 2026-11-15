@@ -44,22 +44,46 @@ class NavExperienceStore:
                 """
             )
 
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS page_states (
+                    uuid TEXT PRIMARY KEY,
+                    experience_uuid TEXT NOT NULL,
+                    step_index INTEGER NOT NULL,
+                    page_url TEXT,
+                    page_title TEXT,
+                    page_state TEXT,
+                    FOREIGN KEY (experience_uuid)
+                        REFERENCES navigation_experiences(uuid)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_page_states
+                ON page_states (
+                    experience_uuid,
+                    step_index
+                )
+                """
+            )
+
     def store(
         self,
         framework: str,
         result_count: int,
         experiences: Any,
-    ) -> str | None:
+    ) -> str:
         """
-        Store an experience if result_count > 0.
+        Store an experience.
 
         Retains at most 25 records per framework, removing the oldest
         records when the limit is exceeded.
 
-        Returns the stored UUID, or None if the experience is not stored.
+        Returns the stored UUID.
         """
-        if result_count <= 0:
-            return None
 
         experience_uuid = str(uuid.uuid4())
         experiences_json = json.dumps(experiences, ensure_ascii=False)
@@ -211,3 +235,66 @@ class NavExperienceStore:
                     deleted_count += cursor.rowcount
 
         return deleted_count
+
+    def store_page_states(
+        self,
+        experience_uuid: str,
+        page_states: list[dict[str, Any]],
+    ) -> int:
+        """
+        Store page states associated with a navigation experience.
+
+        Returns:
+            Number of inserted page states.
+        """
+        if not page_states:
+            return 0
+
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO page_states (
+                    uuid,
+                    experience_uuid,
+                    step_index,
+                    page_url,
+                    page_title,
+                    page_state
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        str(uuid.uuid4()),
+                        experience_uuid,
+                        page_state["step_index"],
+                        page_state.get("page_url"),
+                        page_state.get("page_title"),
+                        json.dumps(
+                            page_state.get("page_state", {}),
+                            ensure_ascii=False,
+                        ),
+                    )
+                    for page_state in page_states
+                ],
+            )
+
+        return len(page_states)
+
+def delete_page_states(self, experience_uuid: str) -> int:
+    """
+    Delete all page states associated with an experience.
+
+    Returns:
+        Number of deleted page states.
+    """
+    with self._connect() as conn:
+        cursor = conn.execute(
+            """
+            DELETE FROM page_states
+            WHERE experience_uuid = ?
+            """,
+            (experience_uuid,),
+        )
+
+        return cursor.rowcount

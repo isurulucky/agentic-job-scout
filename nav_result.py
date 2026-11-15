@@ -5,6 +5,7 @@ class WebsiteNavigationResult(BaseModel):
     url: str
     job_links: list[JobLink] = Field(default_factory=list)
     experience: dict = Field(default_factory=dict)
+    page_states: list[dict] = Field(default_factory=list)
     result_count: int = 0
     termination_reason: str = "unknown"
 
