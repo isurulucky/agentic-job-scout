@@ -176,6 +176,44 @@ class NavExperienceStore:
             }
             for row in rows
         ]
+
+    def retrieve_by_uuid(
+        self,
+        experience_uuid: str,
+    ) -> dict[str, Any] | None:
+        """
+        Retrieve a navigation experience by its UUID.
+
+        Args:
+            experience_uuid: UUID of the navigation experience.
+
+        Returns:
+            A dictionary containing the experience metadata and
+            decoded navigation experience, or None if not found.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT uuid, framework, successful, result_count,
+                    experiences, created_at
+                FROM navigation_experiences
+                WHERE uuid = ?
+                """,
+                (experience_uuid,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "uuid": row["uuid"],
+            "framework": row["framework"],
+            "successful": bool(row["successful"]),
+            "result_count": row["result_count"],
+            "experiences": json.loads(row["experiences"]),
+            "created_at": row["created_at"],
+        }
+    
     def delete(self, experience_uuid: str) -> bool:
         """
         Delete a stored navigation experience by UUID.
@@ -240,32 +278,36 @@ class NavExperienceStore:
         self,
         experience_uuid: str,
         page_states: list[dict[str, Any]],
-    ) -> int:
+    ) -> list[dict[str, Any]]:
         """
         Store page states associated with a navigation experience.
 
         Returns:
-            Number of inserted page states.
+            Inserted page states, including their generated UUIDs.
         """
         if not page_states:
-            return 0
+            return []
 
-        with self._connect() as conn:
-            conn.executemany(
-                """
-                INSERT INTO page_states (
-                    uuid,
-                    experience_uuid,
-                    step_index,
-                    page_url,
-                    page_title,
-                    page_state
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
+        stored_states = []
+
+        for page_state in page_states:
+            state_uuid = str(uuid.uuid4())
+
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO page_states (
+                        uuid,
+                        experience_uuid,
+                        step_index,
+                        page_url,
+                        page_title,
+                        page_state
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
                     (
-                        str(uuid.uuid4()),
+                        state_uuid,
                         experience_uuid,
                         page_state["step_index"],
                         page_state.get("page_url"),
@@ -274,12 +316,15 @@ class NavExperienceStore:
                             page_state.get("page_state", {}),
                             ensure_ascii=False,
                         ),
-                    )
-                    for page_state in page_states
-                ],
-            )
+                    ),
+                )
 
-        return len(page_states)
+            stored_states.append({
+                **page_state,
+                "uuid": state_uuid,
+            })
+
+        return stored_states
 
 def delete_page_states(self, experience_uuid: str) -> int:
     """

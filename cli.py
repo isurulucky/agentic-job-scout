@@ -7,6 +7,7 @@ from browser_nav_agent import BrowserNavigationAgent
 from experience_based_nav import ExperienceBasedNavigator
 from model_factory import create_llm
 from nav_experience_store import NavExperienceStore
+from nav_status_vec_store import NavigationStatusVectorStore
 from vacancy_filter_agent import VacancyFilterAgent
 from url_finder import find_candidate_urls, identify_framework
 from tools import JobLink
@@ -70,7 +71,7 @@ async def main() -> None:
 
     llm = create_llm(args.provider, args.model)
 
-    experience_store = NavExperienceStore()
+    nav_experience_store = NavExperienceStore()
 
     # Retrieve previous navigation experiences for each website.
     experiences: dict[str, list[dict]] = {}
@@ -80,7 +81,7 @@ async def main() -> None:
     for target_url in target_urls:
         framework = identify_framework(target_url)
 
-        previous_records = experience_store.retrieve(
+        previous_records = nav_experience_store.retrieve(
             framework=framework,
             limit=10,
         )
@@ -99,6 +100,7 @@ async def main() -> None:
             f"experiences for {target_url} ({framework})."
         )
 
+    nav_vec_store = NavigationStatusVectorStore()
 
     # Attempt deterministic navigation for websites with experiences.
     exp_based_navigator = ExperienceBasedNavigator(
@@ -126,7 +128,7 @@ async def main() -> None:
 
 
     if failed_urls:
-        deleted_count = experience_store.delete_by_target_urls(
+        deleted_count = nav_experience_store.delete_by_target_urls(
             failed_urls
         )
 
@@ -135,20 +137,27 @@ async def main() -> None:
             f"for {len(failed_urls)} URLs."
         )
 
-    # Include websites without previous experiences.
-    urls_for_agent = target_urls_without_exp + failed_urls
-
-
     # Use the LLM navigator for new websites and failed replays.
     browser_nav_agent = BrowserNavigationAgent(
         keywords=args.keywords,
         location=args.location,
         language=args.language,
+        nav_vector_store=nav_vec_store,
+        nav_experience_store=nav_experience_store,
         llm=llm,
     )
 
+    # Include websites without previous experiences.
+    urls_for_agent = target_urls_without_exp + failed_urls
+    target_url_to_framework: dict[str, str] = dict()
+
+    for url in urls_for_agent: 
+        framework = identify_framework(url)
+        target_url_to_framework[url] = framework
+
+
     agentic_nav_results = await browser_nav_agent.run(
-        target_urls=urls_for_agent,
+        target_url_to_framework=target_url_to_framework,
         headless=args.headless,
     )
 
@@ -174,15 +183,21 @@ async def main() -> None:
         framework = identify_framework(result.url)
 
         if result.experience:
-            experience_id = experience_store.store(
+            experience_id = nav_experience_store.store(
                 framework=framework,
                 result_count=result.result_count,
                 experiences=result.experience,
             )
 
-            experience_store.store_page_states(
+            stored_states = nav_experience_store.store_page_states(
                 experience_uuid=experience_id,
                 page_states=result.page_states,
+            )
+
+            nav_vec_store.add(
+                experience_uuid=experience_id,
+                framework=framework,
+                page_states=stored_states,
             )
             print(
                 f"\n[*] Stored navigation experience for "
@@ -225,10 +240,10 @@ async def main() -> None:
 
     job_links = await filtering_agent.run(filtered_links)
 
-    print(f"\n[*] Found {len(job_links)} matching vacancies:")
-
-    for job_link in job_links:
-        print(job_link.url)
+    if job_links:
+        print(f"\n[*] Found {len(job_links)} matching vacancies:")
+        for job_link in job_links:
+            print(job_link.url)
 
 
 if __name__ == "__main__":

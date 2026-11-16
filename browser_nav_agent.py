@@ -5,9 +5,12 @@ from playwright.async_api import async_playwright
 
 from langchain.chat_models import BaseChatModel
 from langchain_core.tools import StructuredTool
+from langchain_core.documents import Document
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
+from nav_experience_store import NavExperienceStore
+from nav_status_vec_store import NavigationStatusVectorStore
 from tools import BrowserTools, JobLink
 from nav_result import WebsiteNavigationResult, normalize_job_links, normalize_value
 
@@ -28,6 +31,8 @@ class BrowserNavigationAgent:
         keywords: str,
         location: str,
         language: str,
+        nav_vector_store: NavigationStatusVectorStore,
+        nav_experience_store: NavExperienceStore,
         llm:  BaseChatModel,
         max_iterations: int = 15,
         navigation_timeout_millis: int = 30_000
@@ -36,6 +41,8 @@ class BrowserNavigationAgent:
         self.keywords = keywords
         self.location = location
         self.language = language
+        self.nav_vec_store = nav_vector_store
+        self.nav_exp_store = nav_experience_store
         self.llm = llm
         self.max_iterations = max_iterations
         self.navigation_timeout_millis = navigation_timeout_millis
@@ -43,7 +50,7 @@ class BrowserNavigationAgent:
         self._interact_tool = "interact"
         self._extract_urls_tool = "extract_urls"
 
-    def _build_system_prompt(self, experiences) -> str:
+    def _build_system_prompt(self) -> str:
         return f"""
         You are an autonomous browser agent responsible for discovering
         job vacancy URLs on careers websites.
@@ -61,8 +68,9 @@ class BrowserNavigationAgent:
         4. VERIFY: After every `{self._interact_tool}` call, call `{self._page_state_tool}` to verify the outcome. Never call `{self._interact_tool}` twice consecutively.
 
         Navigation guidelines:
+        - Always dismiss cookie banners, consent forms, privacy settings forms and any other similar form when they appear.
+        If an overlay blocks interaction, resolve it before attempting to interact with underlying page elements.
         - Focus on careers pages, job listings, and vacancy search interfaces.
-        - Dismiss cookie banners, consent forms, and other blockers when necessary.
         - Prefer job-related filters and vacancy links over unnecessary navigation.
         - Avoid unrelated pages, arbitrary clicks, repeated ineffective actions, and navigation loops.
         - Use the search criteria to guide navigation and available filtering.
@@ -76,10 +84,39 @@ class BrowserNavigationAgent:
         and their visible link text by calling `{self._extract_urls_tool}`.
         """
 
+    def _page_state_with_matching_nav_steps(
+        self, 
+        results: list[tuple[Document, float]],
+    ) -> list[dict]:
+
+        experiences = []
+
+        for document, score in results:
+            prev_experience = self.nav_exp_store.retrieve_by_uuid(
+                document.metadata["experience_uuid"]
+            )
+
+            if not prev_experience:
+                continue
+
+            step_index = document.metadata["step_index"]
+            steps = prev_experience["experiences"].get("steps", [])
+            navigation_step = steps[step_index]
+
+            if not navigation_step.get("success", False):
+                continue
+
+            experiences.append({
+                "relevance": round(score, 3),
+                "page_state": document.page_content,
+                "navigation_step": navigation_step,
+            })
+
+        return experiences
+
     async def run(
         self,
-        target_urls: list[str],
-        experiences: dict[str, list[dict]] | None = None,
+        target_url_to_framework: dict[str, str],
         headless: bool = False,
     ) -> list[WebsiteNavigationResult]:
         """Navigate target websites and return per-website navigation results."""
@@ -90,7 +127,7 @@ class BrowserNavigationAgent:
             browser = await playwright.chromium.launch(headless=headless)
 
             try:
-                for target_url in target_urls:
+                for target_url, framework in target_url_to_framework.items():
                     context = None
                     termination_reason = "iteration_limit"
                     site_candidates: dict[str, JobLink] = {}
@@ -164,35 +201,22 @@ class BrowserNavigationAgent:
                             for tool in tools
                         }
 
-                        known_experiences = (experiences or {}).get(
-                            target_url,
-                            [],
+                        system_message = SystemMessage(
+                            content=self._build_system_prompt()
                         )
 
-                        print(
-                            f"\n[*] Found {len(known_experiences)} "
-                            "previous navigation experiences."
-                        )
-
-                        if known_experiences:
-                            print(
-                                "Previous nav experience #1: "
-                                f"{known_experiences[0]}"
+                        initial_message = HumanMessage(
+                            content=(
+                                "Begin by observing the page state "
+                                f"at {target_url}."
                             )
+                        )
 
-                        messages = [
-                            SystemMessage(
-                                content=self._build_system_prompt(
-                                    known_experiences
-                                )
-                            ),
-                            HumanMessage(
-                                content=(
-                                    "Begin by observing the page state "
-                                    f"at {target_url}."
-                                )
-                            ),
-                        ]
+                        base_messages = [system_message, initial_message]
+                        messages = base_messages.copy()
+
+                        # Stores guidance retrieved for the current page state.
+                        page_state_and_nav_steps = []
 
                         extraction_completed = False
 
@@ -202,8 +226,29 @@ class BrowserNavigationAgent:
                                 f"{iteration + 1}/{self.max_iterations} ---"
                             )
 
+                            # Add retrieved experience guidance only to this
+                            # invocation. Do not append it to persistent messages.
+                            llm_messages = messages
+
+                            if page_state_and_nav_steps:
+                                experience_context = HumanMessage(
+                                    content=(
+                                        "Relevant previous navigation experiences:\n"
+                                        + json.dumps(
+                                            page_state_and_nav_steps,
+                                            ensure_ascii=False,
+                                            default=_serialize_default,
+                                        )
+                                        + "\n\nUse these experiences as guidance when deciding how to navigate the current website. "
+                                        "Look for similar elements, actions, and navigation patterns, but do not assume that element names or page structures are identical. "
+                                        "Adapt the suggested actions to the current page state and navigation context."
+                                    )
+                                )
+
+                                llm_messages = messages + [experience_context]
+
                             try:
-                                ai_msg = await llm_with_tools.ainvoke(messages)
+                                ai_msg = await llm_with_tools.ainvoke(llm_messages)
 
                             except Exception as exc:
                                 termination_reason = "model_error"
@@ -214,8 +259,6 @@ class BrowserNavigationAgent:
                                 )
                                 break
 
-                            messages.append(ai_msg)
-
                             if not ai_msg.tool_calls:
                                 termination_reason = "agent_stopped"
 
@@ -224,6 +267,9 @@ class BrowserNavigationAgent:
                                     f"Response: {ai_msg.content}"
                                 )
                                 break
+
+                            # Keep only the tool responses from this iteration.
+                            iteration_tool_messages = []
 
                             for tool_call in ai_msg.tool_calls:
                                 tool_call_id = tool_call["id"]
@@ -241,12 +287,13 @@ class BrowserNavigationAgent:
                                         ),
                                     }
 
-                                    messages.append(
-                                        ToolMessage(
-                                            tool_call_id=tool_call_id,
-                                            content=json.dumps(tool_result),
-                                        )
+                                    tool_message = ToolMessage(
+                                        tool_call_id=tool_call_id,
+                                        content=json.dumps(tool_result),
                                     )
+
+                                    messages.append(tool_message)
+                                    iteration_tool_messages.append(tool_message)
                                     continue
 
                                 chosen_tool = tools_map.get(tool_name)
@@ -257,12 +304,13 @@ class BrowserNavigationAgent:
                                         "message": f"Unknown tool: {tool_name}",
                                     }
 
-                                    messages.append(
-                                        ToolMessage(
-                                            tool_call_id=tool_call_id,
-                                            content=json.dumps(tool_result),
-                                        )
+                                    tool_message = ToolMessage(
+                                        tool_call_id=tool_call_id,
+                                        content=json.dumps(tool_result),
                                     )
+
+                                    messages.append(tool_message)
+                                    iteration_tool_messages.append(tool_message)
                                     continue
 
                                 # Resolve the element name and type using the
@@ -361,6 +409,29 @@ class BrowserNavigationAgent:
                                         # element IDs can be mapped to names.
                                         current_page_state = tool_result
 
+                                        # Reset guidance for every new page state.
+                                        page_state_and_nav_steps = []
+
+                                        similar_states = self.nav_vec_store.retrieve(
+                                            page_state=current_page_state,
+                                            framework=framework,
+                                        )
+
+                                        if similar_states:
+                                            page_state_and_nav_steps = (
+                                                self._page_state_with_matching_nav_steps(
+                                                    similar_states
+                                                )
+                                            )
+                                            if page_state_and_nav_steps:
+                                                print(
+                                                    f"\n[*] Retrieved "
+                                                    f"{len(page_state_and_nav_steps)} "
+                                                    f"relevant navigation steps."
+                                                )
+
+                                                print(f"\n[*] Page state and nav step #1: {page_state_and_nav_steps[0]}")
+
                                     elif tool_name == self._interact_tool:
                                         # Capture the page state preceding the
                                         # interaction only when it succeeds.
@@ -372,9 +443,13 @@ class BrowserNavigationAgent:
                                             page_states.append(
                                                 {
                                                     "step_index": len(navigation_steps),
-                                                    "page_url": (current_page_state.get("url")),
-                                                    "page_title": (current_page_state.get("title")),
-                                                    "page_state": (current_page_state),
+                                                    "page_url": (
+                                                        current_page_state.get("url")
+                                                    ),
+                                                    "page_title": (
+                                                        current_page_state.get("title")
+                                                    ),
+                                                    "page_state": current_page_state,
                                                 }
                                             )
 
@@ -397,9 +472,13 @@ class BrowserNavigationAgent:
                                             page_states.append(
                                                 {
                                                     "step_index": len(navigation_steps),
-                                                    "page_url": (current_page_state.get("url")),
-                                                    "page_title": (current_page_state.get("title")),
-                                                    "page_state": (current_page_state),
+                                                    "page_url": (
+                                                        current_page_state.get("url")
+                                                    ),
+                                                    "page_title": (
+                                                        current_page_state.get("title")
+                                                    ),
+                                                    "page_state": current_page_state,
                                                 }
                                             )
 
@@ -433,7 +512,9 @@ class BrowserNavigationAgent:
                                     tool_success = True
 
                                     if tool_name == self._interact_tool:
-                                        tool_success = bool(tool_result.get("success", False))
+                                        tool_success = bool(
+                                            tool_result.get("success", False)
+                                        )
 
                                     tool_response = {
                                         "success": tool_success,
@@ -479,15 +560,28 @@ class BrowserNavigationAgent:
                                         ),
                                     }
 
-                                messages.append(
-                                    ToolMessage(
-                                        tool_call_id=tool_call_id,
-                                        content=json.dumps(
-                                            tool_response,
-                                            default=_serialize_default,
-                                        ),
-                                    )
+                                tool_message = ToolMessage(
+                                    tool_call_id=tool_call_id,
+                                    content=json.dumps(
+                                        tool_response,
+                                        default=_serialize_default,
+                                    ),
                                 )
+
+                                messages.append(tool_message)
+                                iteration_tool_messages.append(tool_message)
+
+                                if extraction_completed:
+                                    break
+
+                            # Keep the base messages and only the latest
+                            # assistant tool-call message and its responses.
+                            # This prevents previous page states from accumulating.
+                            messages = (
+                                base_messages
+                                + [ai_msg]
+                                + iteration_tool_messages
+                            )
 
                             if extraction_completed:
                                 break
