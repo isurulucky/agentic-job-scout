@@ -15,6 +15,8 @@ class BrowserTools:
         self.page = page
         self.state_version = 0
         self.state_valid = False
+        # element_id -> Frame that contains it (main frame or an iframe).
+        self._element_frames = {}
 
     async def get_page_state(self) -> dict:
         """Retrieves the current page state and assigns versioned element IDs.
@@ -47,6 +49,11 @@ class BrowserTools:
             - value, placeholder: present for text inputs.
             - checked: present for checkboxes and radio buttons.
             - options: present for dropdowns; contains at most 30 options.
+            - frame: present for elements inside an iframe (the frame URL).
+
+            Elements inside open shadow roots and visible iframes are
+            included. Element types: button, dropdown, checkbox, radio,
+            text_input, link, clickable (ARIA options/tabs/menu items).
         """
 
         self.state_version += 1
@@ -58,7 +65,22 @@ class BrowserTools:
         )
 
         js_script = """
-        () => {
+        (startId) => {
+
+            // Collect the document and every open shadow root so elements
+            // inside web components can be found.
+            const roots = [document];
+
+            for (let i = 0; i < roots.length; i++) {
+                roots[i].querySelectorAll('*').forEach(el => {
+                    if (el.shadowRoot) roots.push(el.shadowRoot);
+                });
+            }
+
+            const queryAll = (selector) =>
+                roots.flatMap(root =>
+                    Array.from(root.querySelectorAll(selector))
+                );
 
             const isVisible = (el) => {
                 const rect = el.getBoundingClientRect();
@@ -69,7 +91,7 @@ class BrowserTools:
                     rect.height > 0 &&
                     style.display !== 'none' &&
                     style.visibility !== 'hidden' &&
-                    parseFloat(style.opacity) > 0.5 &&
+                    parseFloat(style.opacity) > 0 &&
                     style.pointerEvents !== 'none'
                 );
             };
@@ -99,7 +121,7 @@ class BrowserTools:
             const getName = (el) => {
                 // Explicit label
                 if (el.id) {
-                    const label = document.querySelector(
+                    const label = el.getRootNode().querySelector(
                         `label[for="${CSS.escape(el.id)}"]`
                     );
 
@@ -162,12 +184,28 @@ class BrowserTools:
                 return '';
             };
 
+            // Remove IDs left over from previous states so that
+            // [element-id='N'] always resolves to exactly one element.
+            queryAll('[element-id], [element-proxy]').forEach(el => {
+                el.removeAttribute('element-id');
+                el.removeAttribute('element-proxy');
+            });
+
             const interactive = [];
+            const tagged = new Set();
 
-            let elementId = 1;
+            let elementId = startId;
 
-            const addElement = (el, type, extra = {}) => {
-                if (!isVisible(el)) return;
+            const addElement = (el, type, extra = {}, proxy = false) => {
+                // An element can match several groups (e.g. <a role="button">);
+                // expose it only once.
+                if (tagged.has(el)) return;
+                if (!proxy && !isVisible(el)) return;
+
+                tagged.add(el);
+
+                // Visually hidden control operated through a visible label.
+                if (proxy) el.setAttribute('element-proxy', '1');
 
                 el.setAttribute('element-id', elementId);
 
@@ -188,7 +226,7 @@ class BrowserTools:
             * Includes native buttons and elements using role="button".
             * Cookie/consent buttons remain visible.
             */
-            document.querySelectorAll(
+            queryAll(
                 'button, [role="button"]'
             ).forEach(el => {
                 addElement(el, 'button');
@@ -201,7 +239,7 @@ class BrowserTools:
             * Hidden/transparent backing selects for custom dropdowns
             * are ignored.
             */
-            document.querySelectorAll('select').forEach(el => {
+            queryAll('select').forEach(el => {
                 if (!isVisible(el)) return;
 
                 addElement(el, 'dropdown', {
@@ -216,9 +254,32 @@ class BrowserTools:
             });
 
             /*
+            * Custom-styled checkboxes/radios often hide the real <input>
+            * (opacity 0 / 0px) and show a label instead. Expose such an
+            * input when its label is visible.
+            */
+            const addToggle = (el, type) => {
+                const extra = { checked: !!el.checked };
+
+                if (el.tagName === 'INPUT' && !isVisible(el)) {
+                    const label =
+                        (el.id && el.getRootNode().querySelector(
+                            `label[for="${CSS.escape(el.id)}"]`
+                        )) || el.closest('label');
+
+                    if (label && isVisible(label)) {
+                        addElement(el, type, extra, true);
+                        return;
+                    }
+                }
+
+                addElement(el, type, extra);
+            };
+
+            /*
             * 3. Checkboxes
             */
-            document.querySelectorAll(
+            queryAll(
                 'input[type="checkbox"], [role="checkbox"]'
             ).forEach(el => {
                 if (
@@ -228,20 +289,16 @@ class BrowserTools:
                     return;
                 }
 
-                addElement(el, 'checkbox', {
-                    checked: !!el.checked
-                });
+                addToggle(el, 'checkbox');
             });
 
             /*
             * 4. Radio buttons
             */
-            document.querySelectorAll(
+            queryAll(
                 'input[type="radio"], [role="radio"]'
             ).forEach(el => {
-                addElement(el, 'radio', {
-                    checked: !!el.checked
-                });
+                addToggle(el, 'radio');
             });
 
             /*
@@ -249,7 +306,7 @@ class BrowserTools:
             *
             * Only inputs intended for textual entry are exposed.
             */
-            document.querySelectorAll(
+            queryAll(
                 'input, textarea'
             ).forEach(el => {
 
@@ -282,12 +339,25 @@ class BrowserTools:
             /*
             * 6. Links
             */
-            document.querySelectorAll('a').forEach(el => {
+            queryAll('a').forEach(el => {
                 if (!el.href) return;
 
                 addElement(el, 'link', {
                     href: el.href
                 });
+            });
+
+            /*
+            * 7. Other clickable widgets
+            *
+            * Custom dropdown options, tabs, menu items, etc. that are not
+            * native buttons or links.
+            */
+            queryAll(
+                '[role="option"], [role="menuitem"], [role="tab"], ' +
+                '[role="combobox"], [role="switch"], [role="link"], summary'
+            ).forEach(el => {
+                addElement(el, 'clickable');
             });
 
             return {
@@ -298,14 +368,61 @@ class BrowserTools:
         }
         """
 
-        state = await self.page.evaluate(js_script)
+        main_frame = self.page.main_frame
+        frames = [main_frame] + [
+            f for f in self.page.frames if f is not main_frame
+        ]
+
+        self._element_frames = {}
+        elements = []
+        main_state = None
+        next_id = 1
+
+        for frame in frames:
+            if frame is not main_frame and not await self._frame_is_visible(
+                frame
+            ):
+                continue
+
+            try:
+                state = await frame.evaluate(js_script, next_id)
+            except Exception as e:
+                if frame is main_frame:
+                    raise
+
+                # Frame navigated or detached mid-evaluation.
+                print(f"[!] Skipping frame {frame.url}: {e}")
+                continue
+
+            if frame is main_frame:
+                main_state = state
+
+            for element in state["elements"]:
+                if frame is not main_frame:
+                    element["frame"] = frame.url
+
+                self._element_frames[element["element_id"]] = frame
+                elements.append(element)
+
+            next_id += len(state["elements"])
 
         result = {
             "state_version": self.state_version,
-            **state
+            "url": main_state["url"],
+            "title": main_state["title"],
+            "elements": elements,
         }
 
         return result
+
+    @staticmethod
+    async def _frame_is_visible(frame) -> bool:
+        """Whether a child frame's <iframe> element is rendered."""
+        try:
+            handle = await frame.frame_element()
+            return await handle.is_visible()
+        except Exception:
+            return False
 
     async def interact(
         self,
@@ -366,15 +483,52 @@ class BrowserTools:
                 "next_step": "get_page_state"
             }
 
+        action = (action or "").strip().lower()
+
         try:
-            locator = self.page.locator(
+            # Elements may live in an iframe; Playwright CSS locators
+            # already pierce open shadow roots.
+            frame = self._element_frames.get(
+                element_id, self.page.main_frame
+            )
+
+            locator = frame.locator(
                 f"[element-id='{element_id}']"
             ).first
+
+            # Check existence first: evaluate() on a missing element would
+            # block for the full default timeout (30s) before failing.
+            visible = (
+                await locator.count() > 0
+                and await locator.is_visible()
+            )
+
+            # Visually hidden checkbox/radio inputs driven by a visible
+            # label are tagged 'element-proxy' by get_page_state.
+            is_proxy = (
+                not visible
+                and not frame.is_detached()
+                and await locator.count() > 0
+                and await locator.get_attribute("element-proxy") is not None
+            )
+
+            if frame.is_detached() or not (visible or is_proxy):
+                return {
+                    "success": False,
+                    "element_id": element_id,
+                    "action": action,
+                    "navigation": None,
+                    "error": "ELEMENT_NOT_FOUND",
+                    "message": (
+                        f"Element ID {element_id} was not found."
+                    ),
+                    "next_step": "get_page_state"
+                }
 
             target = await locator.evaluate("""
             (el) => {
                 const label = el.id
-                    ? document.querySelector(
+                    ? el.getRootNode().querySelector(
                         `label[for="${CSS.escape(el.id)}"]`
                     )
                     : null;
@@ -403,29 +557,16 @@ class BrowserTools:
                 f"| value='{value}'"
             )
 
-            if await locator.count() == 0 or not await locator.is_visible():
-                return {
-                    "success": False,
-                    "element_id": element_id,
-                    "action": action,
-                    "navigation": None,
-                    "error": "ELEMENT_NOT_FOUND",
-                    "message": (
-                        f"Element ID {element_id} was not found."
-                    ),
-                    "next_step": "get_page_state"
-                }
-
             prev_url = self.page.url
 
             if action == "click":
-                await locator.click(timeout=5000)
+                await locator.click(timeout=5000, force=is_proxy)
 
             elif action == "fill":
                 await locator.fill(value, timeout=5000)
 
             elif action == "check":
-                await locator.check(timeout=5000)
+                await locator.check(timeout=5000, force=is_proxy)
 
             elif action == "select":
                 if await locator.evaluate(
@@ -443,10 +584,18 @@ class BrowserTools:
                         "next_step": "get_page_state"
                     }
 
-                await locator.select_option(
-                    label=value,
-                    timeout=5000
-                )
+                try:
+                    await locator.select_option(
+                        label=value,
+                        timeout=5000
+                    )
+                except Exception:
+                    # The agent may pass the option's value instead of
+                    # its visible label.
+                    await locator.select_option(
+                        value=value,
+                        timeout=5000
+                    )
 
             else:
                 return {
@@ -462,8 +611,23 @@ class BrowserTools:
                     "next_step": "get_page_state"
                 }
 
-            current_url = self.page.url
+            # The DOM may have changed: any action invalidates the state.
             self.state_valid = False
+
+            # Let navigation / SPA re-rendering settle so the URL read below
+            # and the next get_page_state() see the post-action page.
+            try:
+                await self.page.wait_for_load_state(
+                    "domcontentloaded", timeout=5000
+                )
+                await self.page.wait_for_load_state(
+                    "networkidle", timeout=3000
+                )
+            except Exception:
+                # Pages with long-polling/analytics may never go idle.
+                pass
+
+            current_url = self.page.url
 
             return {
                 "success": True,
@@ -484,6 +648,9 @@ class BrowserTools:
 
         except Exception as e:
             print(f"Error in interact: {str(e)} \n")
+
+            # A failed action may still have partially changed the page.
+            self.state_valid = False
 
             return {
                 "success": False,
@@ -511,7 +678,18 @@ class BrowserTools:
 
         js_extract = """
         () => {
-            const links = Array.from(document.querySelectorAll('a[href]'));
+            // Include links inside open shadow roots.
+            const roots = [document];
+
+            for (let i = 0; i < roots.length; i++) {
+                roots[i].querySelectorAll('*').forEach(el => {
+                    if (el.shadowRoot) roots[roots.length] = el.shadowRoot;
+                });
+            }
+
+            const links = roots.flatMap(root =>
+                Array.from(root.querySelectorAll('a[href]'))
+            );
 
             return links
                 .map(a => ({
@@ -527,7 +705,21 @@ class BrowserTools:
         }
         """
 
-        raw_links = await self.page.evaluate(js_extract)
+        # Collect from the main frame and every visible iframe
+        # (job boards are frequently embedded).
+        raw_links = []
+
+        for frame in self.page.frames:
+            if (
+                frame is not self.page.main_frame
+                and not await self._frame_is_visible(frame)
+            ):
+                continue
+
+            try:
+                raw_links.extend(await frame.evaluate(js_extract))
+            except Exception as e:
+                print(f"[!] Skipping frame {frame.url}: {e}")
 
         # Deduplicate by URL
         unique_links = {}
