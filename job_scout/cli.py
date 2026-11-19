@@ -3,14 +3,14 @@ import asyncio
 from datetime import date
 from langchain.chat_models import init_chat_model
 
-from browser_nav_agent import BrowserNavigationAgent
-from experience_based_nav import ExperienceBasedNavigator
-from model_factory import create_llm
-from nav_experience_store import NavExperienceStore
-from nav_status_vec_store import NavigationStatusVectorStore
-from vacancy_filter_agent import VacancyFilterAgent
-from url_finder import find_candidate_urls, identify_framework
-from tools import JobLink
+from job_scout.agents.browser_nav_agent import BrowserNavigationAgent
+from job_scout.navigation.experience_based_nav import ExperienceBasedNavigator
+from job_scout.model_factory import create_llm
+from job_scout.storage.nav_experience_store import NavExperienceStore
+from job_scout.storage.nav_status_vec_store import NavigationStatusVectorStore
+from job_scout.agents.vacancy_filter_agent import VacancyFilterAgent
+from job_scout.url_finder import find_candidate_urls, identify_framework
+from job_scout.navigation.tools import JobLink
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(

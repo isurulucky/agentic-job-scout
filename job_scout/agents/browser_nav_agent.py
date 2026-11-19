@@ -9,10 +9,10 @@ from langchain_core.documents import Document
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
-from nav_experience_store import NavExperienceStore
-from nav_status_vec_store import NavigationStatusVectorStore
-from tools import BrowserTools, JobLink
-from nav_result import WebsiteNavigationResult, normalize_job_links, normalize_value
+from job_scout.storage.nav_experience_store import NavExperienceStore
+from job_scout.storage.nav_status_vec_store import NavigationStatusVectorStore
+from job_scout.navigation.tools import BrowserTools, JobLink
+from job_scout.navigation.nav_result import WebsiteNavigationResult, normalize_job_links, normalize_value
 
 
 def _serialize_default(obj: object) -> object:

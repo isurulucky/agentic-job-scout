@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from tools import JobLink
+from job_scout.navigation.tools import JobLink
 
 class WebsiteNavigationResult(BaseModel):
     url: str

@@ -1,6 +1,6 @@
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 
 class NavigationStatusVectorStore:
@@ -8,10 +8,13 @@ class NavigationStatusVectorStore:
         self,
         persist_directory: str = "./chroma_db",
         collection_name: str = "navigation_page_states",
-        embedding_model: str = "text-embedding-3-small",
+        embedding_model: str = "intfloat/multilingual-e5-base",
     ):
-        self.embeddings = OpenAIEmbeddings(model=embedding_model)
-
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name=embedding_model,
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
         self.vector_store = Chroma(
             collection_name=collection_name,
             embedding_function=self.embeddings,
@@ -76,7 +79,7 @@ class NavigationStatusVectorStore:
         page_state: dict,
         framework: str,
         k: int = 5,
-        relevance_score: float = 0.75
+        relevance_score: float = 0.9
     ) -> list[tuple[Document, float]]:
         """Retrieve similar page states, preferring the same framework."""
 

@@ -223,3 +223,6 @@ __marimo__/
 
 # Claude
 .claude/
+CLAUDE.md
+Features.md
+Implementation-Plan.md

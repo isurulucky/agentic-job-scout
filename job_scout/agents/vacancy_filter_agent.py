@@ -1,6 +1,6 @@
 from langchain_core.language_models import BaseChatModel
 
-from tools import JobLink, MatchingVacancies
+from job_scout.navigation.tools import JobLink, MatchingVacancies
 
 
 class VacancyFilterAgent:

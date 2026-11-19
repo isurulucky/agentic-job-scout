@@ -1,5 +1,5 @@
-from tools import BrowserTools, JobLink
-from nav_result import WebsiteNavigationResult, normalize_job_links
+from job_scout.navigation.tools import BrowserTools, JobLink
+from job_scout.navigation.nav_result import WebsiteNavigationResult, normalize_job_links
 from playwright.async_api import async_playwright
 import re
 import unicodedata

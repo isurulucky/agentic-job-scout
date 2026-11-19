@@ -2,7 +2,7 @@ import json
 from pydantic import BaseModel, Field
 from playwright.async_api import Page
 from langchain_core.language_models.chat_models import BaseChatModel
-from url_finder import find_candidate_urls
+from job_scout.url_finder import find_candidate_urls
 
 
 class JobLink(BaseModel):

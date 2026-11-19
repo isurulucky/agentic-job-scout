@@ -115,7 +115,7 @@ export ANTHROPIC_API_KEY="your-api-key"
 Navigate to the project directory and run:
 
 ```bash
-python cli.py
+python -m job_scout
 ```
 
 ## 🎛️ Command-Line Controls
@@ -135,7 +135,7 @@ Give your agent a few instructions before it heads out.
 ### Example: Find Software Engineering Jobs
 
 ```bash
-python cli.py \
+python -m job_scout \
   --urls "https://www.coolblue.nl/en/vacancies,https://catawiki.careers/vacancies,https://careers.adyen.com/" \
   --keywords "Software Engineer" \
   --location "Netherlands" \
@@ -147,7 +147,7 @@ python cli.py \
 Want to use Anthropic instead?
 
 ```bash
-python cli.py \
+python -m job_scout \
   --urls "https://careers.example.com" \
   --keywords "Python Developer" \
   --location "Europe" \
@@ -167,7 +167,7 @@ You can schedule Agentic Job Scout as a cron job and let it search for fresh opp
 For example, to run it every day at **8:00 AM** and append the results to a log file:
 
 ```cron
-0 8 * * * cd /absolute/path/to/project && /absolute/path/to/venv/bin/python cli.py --urls "https://catawiki.careers/vacancies,https://careers.adyen.com/" --keywords "Software Engineer" --location "Europe" --language "English" --headless "True" >> /absolute/path/to/jobscout.log 2>&1
+0 8 * * * cd /absolute/path/to/project && /absolute/path/to/venv/bin/python -m job_scout --urls "https://catawiki.careers/vacancies,https://careers.adyen.com/" --keywords "Software Engineer" --location "Europe" --language "English" --headless "True" >> /absolute/path/to/jobscout.log 2>&1
 ```
 
 Replace the project and virtual environment paths with your own.
